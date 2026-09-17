@@ -26,7 +26,7 @@ func AccConfigDirectory() (string, error) {
 		return "", fmt.Errorf("get user home directory: %w", err)
 	}
 
-	return filepath.Join(home, ".config", ".acrux"), nil
+	return filepath.Join(home, ".config", "acrux"), nil
 }
 
 func AccountFilePath() (string, error) {

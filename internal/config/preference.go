@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	configDirectoryName = ".acrux"
+	configDirectoryName = "acrux"
 	preferenceFileName  = "preference.conf"
 
 	defaultMaxArchiveSize int64 = 1024 * 1024 * 1024 // 1 GB

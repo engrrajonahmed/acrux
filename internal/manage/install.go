@@ -11,7 +11,7 @@ import (
 const (
 	installDirectoryName = ".local/bin"
 	executableName       = "acrux"
-	configDirectoryName  = ".acrux"
+	configDirectoryName  = "acrux"
 )
 
 type InstallResult struct {
