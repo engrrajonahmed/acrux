@@ -1,49 +1,27 @@
 package exchange
 
 import (
-	"errors"
-	"fmt"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-
-	"acrux/internal/config"
 )
 
-type manageItem struct {
-	title string
-}
-
 type manageModel struct {
-	items    []manageItem
+	items    []string
 	cursor   int
-	choice   string
-	quitting bool
+	selected string
 }
 
-func ManageMenu() (string, error) {
-	items := []manageItem{
-		{title: "Accounts"},
-		{title: "Settings"},
-		{title: "Reset"},
-		{title: "Uninstall"},
-		{title: "Back"},
+func NewManage() *manageModel {
+	return &manageModel{
+		items: []string{
+			"Accounts",
+			"Settings",
+			"Reset",
+			"Uninstall",
+			"Back",
+		},
 	}
-
-	model := manageModel{
-		items: items,
-	}
-
-	result, err := tea.NewProgram(model).Run()
-	if err != nil {
-		return "", fmt.Errorf("run manage menu: %w", err)
-	}
-
-	m, ok := result.(manageModel)
-	if !ok {
-		return "", errors.New("invalid manage menu result")
-	}
-
-	return m.choice, nil
 }
 
 func (m manageModel) Init() tea.Cmd {
@@ -54,11 +32,6 @@ func (m manageModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "ctrl+c", "q":
-			m.choice = "Back"
-			m.quitting = true
-			return m, tea.Quit
-
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
@@ -69,16 +42,16 @@ func (m manageModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor++
 			}
 
-		case "enter", " ":
+		case "enter":
 			if len(m.items) == 0 {
-				m.choice = "Back"
-				m.quitting = true
 				return m, tea.Quit
 			}
 
-			m.choice = m.items[m.cursor].title
-			m.quitting = true
+			m.selected = m.items[m.cursor]
+			return m, tea.Quit
 
+		case "esc", "q":
+			m.selected = "Back"
 			return m, tea.Quit
 		}
 	}
@@ -87,56 +60,41 @@ func (m manageModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m manageModel) View() string {
-	if m.quitting {
-		return ""
-	}
+	var b strings.Builder
 
-	view := "Manage\n\n"
+	b.WriteString("Manage\n\n")
 
 	for i, item := range m.items {
-		cursor := " "
-
-		if m.cursor == i {
-			cursor = ">"
+		cursor := "  "
+		if i == m.cursor {
+			cursor = "> "
 		}
 
-		view += fmt.Sprintf("%s %s\n", cursor, item.title)
+		b.WriteString(cursor)
+		b.WriteString(item)
+		b.WriteByte('\n')
 	}
 
-	view += "\nUse ↑/↓ to navigate and Enter to select."
+	b.WriteString("\n↑/↓ navigate, Enter select, q/esc back\n")
 
-	return view
+	return b.String()
 }
 
-func ResetConfiguration() error {
-	accounts, err := config.LoadAccounts()
+func ManageMenu() (string, error) {
+	model := NewManage()
+
+	result, err := tea.NewProgram(
+		model,
+		tea.WithAltScreen(),
+	).Run()
 	if err != nil {
-		return fmt.Errorf("load accounts: %w", err)
+		return "", err
 	}
 
-	preference, err := config.LoadPreference()
-	if err != nil {
-		return fmt.Errorf("load preferences: %w", err)
+	finalModel, ok := result.(manageModel)
+	if !ok {
+		return "", nil
 	}
 
-	if accounts == nil {
-		accounts = []config.Account{}
-	}
-
-	if preference == nil {
-		preference, err = config.DefaultPreference()
-		if err != nil {
-			return fmt.Errorf("create default preferences: %w", err)
-		}
-	}
-
-	if err := config.ResetAccounts(); err != nil {
-		return fmt.Errorf("reset account configuration: %w", err)
-	}
-
-	if err := config.ResetPreference(); err != nil {
-		return fmt.Errorf("reset preference configuration: %w", err)
-	}
-
-	return nil
+	return finalModel.selected, nil
 }

@@ -19,14 +19,19 @@ type browseModel struct {
 	account  config.Account
 	path     string
 	cursor   int
+	offset   int
+	height   int
 	selected string
+	loading  bool
 	quitting bool
 	err      error
 }
 
 func newBrowseLocalModel(startPath string) browseModel {
 	return browseModel{
-		path: startPath,
+		path:   startPath,
+		loading: true,
+		height: 20,
 	}
 }
 
@@ -35,6 +40,8 @@ func newBrowseCloudModel(account config.Account, remotePath string) browseModel 
 		isCloud: true,
 		account: account,
 		path:    remotePath,
+		loading: true,
+		height: 20,
 	}
 }
 
@@ -68,14 +75,25 @@ type cloudBrowseLoadedMsg struct {
 
 func (m browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.height = msg.Height
+		m.updateOffset()
+		return m, nil
+
 	case localBrowseLoadedMsg:
 		m.items = msg.items
 		m.err = msg.err
+		m.loading = false
+		m.cursor = 0
+		m.offset = 0
 		return m, nil
 
 	case cloudBrowseLoadedMsg:
 		m.cloud = msg.items
 		m.err = msg.err
+		m.loading = false
+		m.cursor = 0
+		m.offset = 0
 		return m, nil
 
 	case tea.KeyMsg:
@@ -85,6 +103,10 @@ func (m browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "esc":
+			if m.loading {
+				return m, nil
+			}
+
 			if m.path == "" || (!m.isCloud && isHomePath(m.path)) {
 				m.quitting = true
 				return m, tea.Quit
@@ -92,22 +114,32 @@ func (m browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			m.path = browseParentPath(m.path, m.isCloud)
 			m.cursor = 0
+			m.offset = 0
 			m.err = nil
+			m.loading = true
 			return m, m.Init()
 
 		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
+			if m.loading || m.cursor <= 0 {
+				return m, nil
 			}
 
+			m.cursor--
+			m.updateOffset()
+
 		case "down", "j":
+			if m.loading {
+				return m, nil
+			}
+
 			count := m.itemCount()
 			if m.cursor < count-1 {
 				m.cursor++
+				m.updateOffset()
 			}
 
 		case "enter", "right", "l":
-			if m.itemCount() == 0 {
+			if m.loading || m.itemCount() == 0 {
 				return m, nil
 			}
 
@@ -116,7 +148,9 @@ func (m browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if item.IsDir {
 					m.path = strings.Trim(item.Path, "/")
 					m.cursor = 0
+					m.offset = 0
 					m.err = nil
+					m.loading = true
 					return m, m.Init()
 				}
 			} else {
@@ -124,19 +158,27 @@ func (m browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if item.IsDir {
 					m.path = item.Path
 					m.cursor = 0
+					m.offset = 0
 					m.err = nil
+					m.loading = true
 					return m, m.Init()
 				}
 			}
 
 		case "left", "h":
+			if m.loading {
+				return m, nil
+			}
+
 			if m.path == "" || (!m.isCloud && isHomePath(m.path)) {
 				return m, nil
 			}
 
 			m.path = browseParentPath(m.path, m.isCloud)
 			m.cursor = 0
+			m.offset = 0
 			m.err = nil
+			m.loading = true
 			return m, m.Init()
 		}
 	}
@@ -167,43 +209,82 @@ func (m browseModel) View() string {
 	}
 	builder.WriteString("\n\n")
 
+	if m.loading {
+		builder.WriteString("Loading...\n")
+		builder.WriteString("\n↑/↓ navigate, Enter open directory, Esc/← parent, q quit\n")
+		return builder.String()
+	}
+
 	if m.err != nil {
 		builder.WriteString("Error: ")
 		builder.WriteString(m.err.Error())
 		builder.WriteString("\n\n")
 	}
 
-	if m.isCloud {
-		for i, item := range m.cloud {
-			cursor := "  "
-			if i == m.cursor {
-				cursor = "> "
-			}
+	count := m.itemCount()
 
-			name := item.Name
-			if item.IsDir {
-				name += "/"
-			}
-
-			builder.WriteString(cursor)
-			builder.WriteString(name)
-			builder.WriteString("\n")
-		}
+	if count == 0 && m.err == nil {
+		builder.WriteString("No files or directories.\n")
 	} else {
-		for i, item := range m.items {
-			cursor := "  "
-			if i == m.cursor {
-				cursor = "> "
-			}
+		start := m.offset
+		if start < 0 {
+			start = 0
+		}
+		if start >= count && count > 0 {
+			start = count - 1
+		}
 
-			name := item.Name
-			if item.IsDir {
-				name += "/"
-			}
+		visible := m.visibleItemCount()
 
-			builder.WriteString(cursor)
-			builder.WriteString(name)
-			builder.WriteString("\n")
+		end := start + visible
+		if end > count {
+			end = count
+		}
+
+		if m.isCloud {
+			for i := start; i < end; i++ {
+				item := m.cloud[i]
+
+				cursor := "  "
+				if i == m.cursor {
+					cursor = "> "
+				}
+
+				name := item.Name
+				if item.IsDir {
+					name += "/"
+				}
+
+				builder.WriteString(cursor)
+				builder.WriteString(name)
+				builder.WriteString("\n")
+			}
+		} else {
+			for i := start; i < end; i++ {
+				item := m.items[i]
+
+				cursor := "  "
+				if i == m.cursor {
+					cursor = "> "
+				}
+
+				name := item.Name
+				if item.IsDir {
+					name += "/"
+				}
+
+				builder.WriteString(cursor)
+				builder.WriteString(name)
+				builder.WriteString("\n")
+			}
+		}
+
+		if start > 0 {
+			builder.WriteString("↑ more\n")
+		}
+
+		if end < count {
+			builder.WriteString("↓ more\n")
 		}
 	}
 
@@ -220,10 +301,55 @@ func (m browseModel) itemCount() int {
 	return len(m.items)
 }
 
+func (m browseModel) visibleItemCount() int {
+	const reservedLines = 9
+
+	visible := m.height - reservedLines
+	if visible < 1 {
+		visible = 1
+	}
+
+	return visible
+}
+
+func (m *browseModel) updateOffset() {
+	count := m.itemCount()
+	if count == 0 {
+		m.offset = 0
+		return
+	}
+
+	visible := m.visibleItemCount()
+
+	if m.cursor < m.offset {
+		m.offset = m.cursor
+	}
+
+	if m.cursor >= m.offset+visible {
+		m.offset = m.cursor - visible + 1
+	}
+
+	if m.offset < 0 {
+		m.offset = 0
+	}
+
+	maxOffset := count - visible
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+
+	if m.offset > maxOffset {
+		m.offset = maxOffset
+	}
+}
+
 func BrowseMenu() (string, error) {
 	model := newBrowseTypeModel()
 
-	result, err := tea.NewProgram(model).Run()
+	result, err := tea.NewProgram(
+		model,
+		tea.WithAltScreen(),
+	).Run()
 	if err != nil {
 		return "", err
 	}
@@ -339,7 +465,10 @@ func browseLocal() string {
 
 	model := newBrowseLocalModel(startPath)
 
-	result, err := tea.NewProgram(model).Run()
+	result, err := tea.NewProgram(
+		model,
+		tea.WithAltScreen(),
+	).Run()
 	if err != nil {
 		return err.Error()
 	}
@@ -373,7 +502,10 @@ func browseCloud() string {
 
 	model := newAccountSelectionModel(accountItems)
 
-	result, err := tea.NewProgram(model).Run()
+	result, err := tea.NewProgram(
+		model,
+		tea.WithAltScreen(),
+	).Run()
 	if err != nil {
 		return err.Error()
 	}
@@ -393,7 +525,10 @@ func browseCloud() string {
 
 	cloudModel := newBrowseCloudModel(account, "")
 
-	result, err = tea.NewProgram(cloudModel).Run()
+	result, err = tea.NewProgram(
+		cloudModel,
+		tea.WithAltScreen(),
+	).Run()
 	if err != nil {
 		return err.Error()
 	}

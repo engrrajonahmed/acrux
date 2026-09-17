@@ -1,47 +1,24 @@
 package exchange
 
 import (
-	"errors"
-	"fmt"
-
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-type MenuItem struct {
-	Title string
-}
-
 type menuModel struct {
-	items  []MenuItem
 	cursor int
-	choice string
-	quitting bool
+	items  []string
 }
 
-func MainMenu() (string, error) {
-	items := []MenuItem{
-		{Title: "Browse"},
-		{Title: "Copy"},
-		{Title: "Delete"},
-		{Title: "Manage"},
-		{Title: "Exit"},
+func NewMenu() *menuModel {
+	return &menuModel{
+		items: []string{
+			"Browse",
+			"Copy",
+			"Delete",
+			"Manage",
+			"Exit",
+		},
 	}
-
-	model := menuModel{
-		items: items,
-	}
-
-	result, err := tea.NewProgram(model).Run()
-	if err != nil {
-		return "", fmt.Errorf("run main menu: %w", err)
-	}
-
-	m, ok := result.(menuModel)
-	if !ok {
-		return "", errors.New("invalid main menu result")
-	}
-
-	return m.choice, nil
 }
 
 func (m menuModel) Init() tea.Cmd {
@@ -52,11 +29,6 @@ func (m menuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "ctrl+c", "q":
-			m.choice = "Exit"
-			m.quitting = true
-			return m, tea.Quit
-
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
@@ -67,21 +39,27 @@ func (m menuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor++
 			}
 
-		case "enter", " ":
-			if len(m.items) == 0 {
-				m.choice = "Exit"
-				m.quitting = true
+		case "enter":
+			switch m.cursor {
+			case 0:
+				return m, func() tea.Msg {
+					return BrowseMsg{}
+				}
+			case 1:
+				return m, func() tea.Msg {
+					return CopyMsg{}
+				}
+			case 2:
+				return m, func() tea.Msg {
+					return DeleteMsg{}
+				}
+			case 3:
+				return m, func() tea.Msg {
+					return ManageMsg{}
+				}
+			case 4:
 				return m, tea.Quit
 			}
-
-			m.choice = m.items[m.cursor].Title
-
-			if m.choice == "Exit" {
-				m.quitting = true
-				return m, tea.Quit
-			}
-
-			return m, tea.Quit
 		}
 	}
 
@@ -89,24 +67,34 @@ func (m menuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m menuModel) View() string {
-	if m.quitting {
-		return ""
-	}
-
-	var view string
-
-	view += "acrux\n\n"
+	s := "acrux\n\n"
 
 	for i, item := range m.items {
-		cursor := " "
-		if m.cursor == i {
-			cursor = ">"
+		cursor := "  "
+		if i == m.cursor {
+			cursor = "> "
 		}
 
-		view += fmt.Sprintf("%s %s\n", cursor, item.Title)
+		s += cursor + item + "\n"
 	}
 
-	view += "\nUse ↑/↓ to navigate and Enter to select."
+	s += "\nUse ↑/↓ to navigate and Enter to select."
 
-	return view
+	return s
+}
+
+type BrowseMsg struct{}
+type CopyMsg struct{}
+type DeleteMsg struct{}
+type ManageMsg struct{}
+
+func MainMenu() error {
+	model := NewMenu()
+
+	_, err := tea.NewProgram(
+		model,
+		tea.WithAltScreen(),
+	).Run()
+
+	return err
 }
