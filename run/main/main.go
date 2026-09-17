@@ -35,9 +35,7 @@ func newRootCommand() *cobra.Command {
 		},
 	}
 
-	cmd.AddCommand(
-		newVersionCommand(),
-	)
+	cmd.AddCommand(newVersionCommand())
 
 	return cmd
 }
@@ -84,6 +82,7 @@ func runApplication() error {
 			if err != nil {
 				return err
 			}
+
 			if shouldExit {
 				return nil
 			}
@@ -98,15 +97,25 @@ func runApplication() error {
 }
 
 func initializeApplication() error {
-	if manage.IsRunningFromInstalledLocation() {
+	executablePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve executable path: %w", err)
+	}
+
+	runningInstalled, err := manage.IsRunningFromInstalledLocation(executablePath)
+	if err != nil {
+		return fmt.Errorf("check installation location: %w", err)
+	}
+
+	if runningInstalled {
 		if _, err := config.LoadPreference(); err != nil {
-			if _, initErr := config.InitializePreference(); initErr != nil {
+			if initErr := config.InitializePreference(); initErr != nil {
 				return fmt.Errorf("initialize preferences: %w", initErr)
 			}
 		}
 
 		if _, err := config.LoadAccounts(); err != nil {
-			if _, initErr := config.InitializeAccounts(); initErr != nil {
+			if initErr := config.InitializeAccounts(); initErr != nil {
 				return fmt.Errorf("initialize accounts: %w", initErr)
 			}
 		}
@@ -114,26 +123,39 @@ func initializeApplication() error {
 		return nil
 	}
 
-	installed := manage.IsInstalled()
+	installed, err := manage.IsInstalled()
+	if err != nil {
+		return fmt.Errorf("check acrux installation: %w", err)
+	}
+
 	if installed {
 		return nil
 	}
 
-	return runInstallation()
+	return runInstallation(executablePath)
 }
 
-func runInstallation() error {
+func runInstallation(sourceExecutable string) error {
+	if sourceExecutable == "" {
+		return fmt.Errorf("source executable path is empty")
+	}
+
 	fmt.Println("acrux is not installed for the current user.")
 	fmt.Println("Installation is required to continue.")
 	fmt.Println()
 
-	installed, err := manage.Install()
+	result, err := manage.Install(sourceExecutable)
 	if err != nil {
 		return fmt.Errorf("install acrux: %w", err)
 	}
 
-	if !installed {
-		return fmt.Errorf("installation was not completed")
+	if result == nil {
+		return fmt.Errorf("installation returned no result")
+	}
+
+	if result.AlreadyInstalled {
+		fmt.Println("acrux is already installed.")
+		return nil
 	}
 
 	fmt.Println()

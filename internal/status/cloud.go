@@ -2,99 +2,113 @@ package status
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
-	"time"
+
+	"acrux/internal/config"
 
 	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/config"
-	"github.com/rclone/rclone/fs/operations"
 )
 
 type CloudStatus struct {
-	Remote      string
-	Path        string
-	Exists      bool
-	IsDirectory bool
-	IsFile      bool
-	Size        int64
-	Modified    time.Time
+	Path      string
+	Exists    bool
+	Available bool
+	Size      int64
 }
 
-func GetCloudStatus(remote, remotePath string) (*CloudStatus, error) {
-	if strings.TrimSpace(remote) == "" {
-		return nil, errors.New("cloud remote cannot be empty")
-	}
-
-	remotePath = strings.TrimPrefix(strings.TrimSpace(remotePath), "/")
-
+func GetCloudStatus(account config.Account, remotePath string) (CloudStatus, error) {
 	ctx := context.Background()
 
-	fsrc, err := config.NewFs(ctx, remote+":"+remotePath)
-	if err != nil {
-		return nil, fmt.Errorf("initialize cloud remote %q: %w", remote, err)
+	remoteName := strings.TrimSpace(account.Label)
+	if remoteName == "" {
+		return CloudStatus{}, fmt.Errorf("cloud account label is required")
 	}
 
-	status := &CloudStatus{
-		Remote: remote,
-		Path:   remotePath,
+	remotePath = strings.Trim(remotePath, "/")
+
+	fsPath := remoteName + ":"
+	if remotePath != "" {
+		fsPath += remotePath
+	}
+
+	fsrc, err := fs.NewFs(ctx, fsPath)
+	if err != nil {
+		return CloudStatus{
+			Path:      remotePath,
+			Exists:    false,
+			Available: false,
+		}, fmt.Errorf("open cloud remote %q: %w", fsPath, err)
+	}
+
+	status := CloudStatus{
+		Path:      remotePath,
+		Available: true,
 	}
 
 	if remotePath == "" {
 		status.Exists = true
-		status.IsDirectory = true
 		return status, nil
 	}
 
-	parentPath := remotePath
-	name := remotePath
-
-	if index := strings.LastIndex(remotePath, "/"); index >= 0 {
-		parentPath = remotePath[:index]
-		name = remotePath[index+1:]
+	entry, err := fsrc.NewObject(ctx, remotePath)
+	if err == nil {
+		status.Exists = true
+		status.Size = entry.Size()
+		return status, nil
 	}
 
-	parentFS, err := config.NewFs(ctx, remote+":"+parentPath)
-	if err != nil {
-		return nil, fmt.Errorf("initialize cloud parent %q: %w", parentPath, err)
+	entries, listErr := fsrc.List(ctx, remotePath)
+	if listErr == nil {
+		status.Exists = true
+		status.Size = 0
+
+		for _, entry := range entries {
+			if entry == nil {
+				continue
+			}
+
+			if object, ok := entry.(fs.Object); ok {
+				status.Size += object.Size()
+			}
+		}
+
+		return status, nil
 	}
 
-	entries, err := operations.List(ctx, parentFS, "")
-	if err != nil {
-		return nil, fmt.Errorf("list cloud path %q: %w", parentPath, err)
+	parent := remotePath
+	if index := strings.LastIndex(parent, "/"); index >= 0 {
+		parent = parent[:index]
+	} else {
+		parent = ""
+	}
+
+	entries, listErr = fsrc.List(ctx, parent)
+	if listErr != nil {
+		return status, nil
 	}
 
 	for _, entry := range entries {
-		if strings.TrimSuffix(entry.Remote(), "/") != name {
+		if entry == nil {
 			continue
 		}
 
-		status.Exists = true
+		if entry.Remote() == remotePath {
+			status.Exists = true
 
-		switch object := entry.(type) {
-		case fs.Directory:
-			status.IsDirectory = true
-			status.Size = object.Size()
-			status.Modified = object.ModTime(ctx)
+			if object, ok := entry.(fs.Object); ok {
+				status.Size = object.Size()
+			}
 
-		case fs.Object:
-			status.IsFile = true
-			status.Size = object.Size()
-			status.Modified = object.ModTime(ctx)
-
-		default:
-			return nil, fmt.Errorf("unsupported cloud item type for %q", remotePath)
+			return status, nil
 		}
-
-		return status, nil
 	}
 
 	return status, nil
 }
 
-func CloudExists(remote, remotePath string) (bool, error) {
-	status, err := GetCloudStatus(remote, remotePath)
+func CloudExists(account config.Account, remotePath string) (bool, error) {
+	status, err := GetCloudStatus(account, remotePath)
 	if err != nil {
 		return false, err
 	}
@@ -102,35 +116,31 @@ func CloudExists(remote, remotePath string) (bool, error) {
 	return status.Exists, nil
 }
 
-func CloudSize(remote, remotePath string) (int64, error) {
-	status, err := GetCloudStatus(remote, remotePath)
+func CloudSize(account config.Account, remotePath string) (int64, error) {
+	status, err := GetCloudStatus(account, remotePath)
 	if err != nil {
 		return 0, err
 	}
 
 	if !status.Exists {
-		return 0, fmt.Errorf("cloud path does not exist: %s:%s", remote, remotePath)
+		return 0, fmt.Errorf("cloud path does not exist: %s", remotePath)
 	}
 
 	return status.Size, nil
 }
 
-func CloudAvailable(remote string) (bool, error) {
-	if strings.TrimSpace(remote) == "" {
-		return false, errors.New("cloud remote cannot be empty")
-	}
-
+func CloudAvailable(account config.Account) bool {
 	ctx := context.Background()
 
-	fsrc, err := config.NewFs(ctx, remote+":")
-	if err != nil {
-		return false, fmt.Errorf("initialize cloud remote %q: %w", remote, err)
+	remoteName := strings.TrimSpace(account.Label)
+	if remoteName == "" {
+		return false
 	}
 
-	_, err = operations.List(ctx, fsrc, "")
+	fsrc, err := fs.NewFs(ctx, remoteName+":")
 	if err != nil {
-		return false, fmt.Errorf("access cloud remote %q: %w", remote, err)
+		return false
 	}
 
-	return true, nil
+	return fsrc != nil
 }

@@ -1,11 +1,10 @@
 package exchange
 
 import (
-	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"acrux/internal/browse"
 	"acrux/internal/config"
@@ -13,78 +12,88 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-type browseMode int
-
-const (
-	browseModeLocation browseMode = iota
-	browseModeLocal
-	browseModeCloudAccount
-	browseModeCloud
-)
-
 type browseModel struct {
-	mode       browseMode
-	cursor     int
-	items      []browseEntry
-	path       string
-	remote     string
-	remotePath string
-	choice     string
-	message    string
-	quitting   bool
-}
-
-type browseEntry struct {
-	name     string
+	items    []browse.LocalItem
+	cloud    []browse.CloudItem
+	isCloud  bool
+	account  config.Account
 	path     string
-	isDir    bool
-	size     int64
-	created  time.Time
-	modified time.Time
+	cursor   int
+	selected string
+	quitting bool
+	err      error
 }
 
-func BrowseMenu() (string, error) {
-	model := newBrowseModel()
-
-	result, err := tea.NewProgram(model).Run()
-	if err != nil {
-		return "", fmt.Errorf("run browse interface: %w", err)
-	}
-
-	m, ok := result.(browseModel)
-	if !ok {
-		return "", errors.New("invalid browse result")
-	}
-
-	return m.choice, nil
-}
-
-func newBrowseModel() browseModel {
+func newBrowseLocalModel(startPath string) browseModel {
 	return browseModel{
-		mode: browseModeLocation,
-		items: []browseEntry{
-			{name: "Local"},
-			{name: "Cloud"},
-			{name: "Back"},
-		},
+		path: startPath,
+	}
+}
+
+func newBrowseCloudModel(account config.Account, remotePath string) browseModel {
+	return browseModel{
+		isCloud: true,
+		account: account,
+		path:    remotePath,
 	}
 }
 
 func (m browseModel) Init() tea.Cmd {
-	return nil
+	return func() tea.Msg {
+		if m.isCloud {
+			items, err := browse.ListCloud(m.account, m.path)
+			return cloudBrowseLoadedMsg{
+				items: items,
+				err:   err,
+			}
+		}
+
+		items, err := browse.ListLocal(m.path)
+		return localBrowseLoadedMsg{
+			items: items,
+			err:   err,
+		}
+	}
+}
+
+type localBrowseLoadedMsg struct {
+	items []browse.LocalItem
+	err   error
+}
+
+type cloudBrowseLoadedMsg struct {
+	items []browse.CloudItem
+	err   error
 }
 
 func (m browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case localBrowseLoadedMsg:
+		m.items = msg.items
+		m.err = msg.err
+		return m, nil
+
+	case cloudBrowseLoadedMsg:
+		m.cloud = msg.items
+		m.err = msg.err
+		return m, nil
+
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
-			m.choice = "Back"
 			m.quitting = true
 			return m, tea.Quit
 
-		case "esc", "backspace":
-			return m.goBack()
+		case "esc":
+			if m.path == "" || (!m.isCloud && isHomePath(m.path)) {
+				m.quitting = true
+				return m, tea.Quit
+			}
+
+			m.path = browseParentPath(m.path, m.isCloud)
+			m.cursor = 0
+			m.err = nil
+			return m, m.Init()
 
 		case "up", "k":
 			if m.cursor > 0 {
@@ -92,12 +101,43 @@ func (m browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "down", "j":
-			if m.cursor < len(m.items)-1 {
+			count := m.itemCount()
+			if m.cursor < count-1 {
 				m.cursor++
 			}
 
-		case "enter", " ":
-			return m.selectCurrent()
+		case "enter", "right", "l":
+			if m.itemCount() == 0 {
+				return m, nil
+			}
+
+			if m.isCloud {
+				item := m.cloud[m.cursor]
+				if item.IsDir {
+					m.path = strings.Trim(item.Path, "/")
+					m.cursor = 0
+					m.err = nil
+					return m, m.Init()
+				}
+			} else {
+				item := m.items[m.cursor]
+				if item.IsDir {
+					m.path = item.Path
+					m.cursor = 0
+					m.err = nil
+					return m, m.Init()
+				}
+			}
+
+		case "left", "h":
+			if m.path == "" || (!m.isCloud && isHomePath(m.path)) {
+				return m, nil
+			}
+
+			m.path = browseParentPath(m.path, m.isCloud)
+			m.cursor = 0
+			m.err = nil
+			return m, m.Init()
 		}
 	}
 
@@ -111,349 +151,372 @@ func (m browseModel) View() string {
 
 	var builder strings.Builder
 
-	switch m.mode {
-	case browseModeLocation:
-		builder.WriteString("Browse\n\n")
+	builder.WriteString("Browse\n\n")
 
-	case browseModeLocal:
-		builder.WriteString("Browse / Local\n\n")
-		builder.WriteString("Path: ")
-		builder.WriteString(m.path)
-		builder.WriteString("\n\n")
-
-	case browseModeCloudAccount:
-		builder.WriteString("Browse / Cloud\n\n")
-		builder.WriteString("Select account:\n\n")
-
-	case browseModeCloud:
-		builder.WriteString("Browse / Cloud\n\n")
-		builder.WriteString("Remote: ")
-		builder.WriteString(m.remote)
-		builder.WriteString("\nPath: ")
-		builder.WriteString(m.remotePath)
-		builder.WriteString("\n\n")
-	}
-
-	if m.message != "" {
-		builder.WriteString(m.message)
-		builder.WriteString("\n\n")
-	}
-
-	for i, item := range m.items {
-		cursor := " "
-
-		if i == m.cursor {
-			cursor = ">"
-		}
-
-		builder.WriteString(fmt.Sprintf("%s %s", cursor, item.name))
-
-		if m.mode == browseModeLocal ||
-			m.mode == browseModeCloud {
-			builder.WriteString(formatEntryMetadata(item))
-		}
-
+	if m.isCloud {
+		builder.WriteString("Account: ")
+		builder.WriteString(m.account.Label)
 		builder.WriteString("\n")
 	}
 
-	builder.WriteString("\n↑/↓ navigate  Enter open  Esc back  q quit")
+	builder.WriteString("Path: ")
+	if m.path == "" {
+		builder.WriteString("/")
+	} else {
+		builder.WriteString(m.path)
+	}
+	builder.WriteString("\n\n")
+
+	if m.err != nil {
+		builder.WriteString("Error: ")
+		builder.WriteString(m.err.Error())
+		builder.WriteString("\n\n")
+	}
+
+	if m.isCloud {
+		for i, item := range m.cloud {
+			cursor := "  "
+			if i == m.cursor {
+				cursor = "> "
+			}
+
+			name := item.Name
+			if item.IsDir {
+				name += "/"
+			}
+
+			builder.WriteString(cursor)
+			builder.WriteString(name)
+			builder.WriteString("\n")
+		}
+	} else {
+		for i, item := range m.items {
+			cursor := "  "
+			if i == m.cursor {
+				cursor = "> "
+			}
+
+			name := item.Name
+			if item.IsDir {
+				name += "/"
+			}
+
+			builder.WriteString(cursor)
+			builder.WriteString(name)
+			builder.WriteString("\n")
+		}
+	}
+
+	builder.WriteString("\n↑/↓ navigate, Enter open directory, Esc/← parent, q quit\n")
 
 	return builder.String()
 }
 
-func (m browseModel) selectCurrent() (tea.Model, tea.Cmd) {
-	if len(m.items) == 0 {
-		return m, nil
+func (m browseModel) itemCount() int {
+	if m.isCloud {
+		return len(m.cloud)
 	}
 
-	entry := m.items[m.cursor]
+	return len(m.items)
+}
 
-	switch m.mode {
-	case browseModeLocation:
-		switch entry.name {
-		case "Local":
-			return m.openLocal()
+func BrowseMenu() (string, error) {
+	model := newBrowseTypeModel()
 
-		case "Cloud":
-			return m.openCloudAccounts()
+	result, err := tea.NewProgram(model).Run()
+	if err != nil {
+		return "", err
+	}
 
-		case "Back":
-			m.choice = "Back"
+	finalModel, ok := result.(browseTypeModel)
+	if !ok {
+		return "", fmt.Errorf("invalid browse menu result")
+	}
+
+	if finalModel.selected == "" || finalModel.selected == "Back" {
+		return "", nil
+	}
+
+	switch finalModel.selected {
+	case "Local":
+		return browseLocal(), nil
+	case "Cloud":
+		return browseCloud(), nil
+	default:
+		return "", nil
+	}
+}
+
+type browseTypeModel struct {
+	items    []string
+	cursor   int
+	selected string
+	quitting bool
+}
+
+func newBrowseTypeModel() browseTypeModel {
+	return browseTypeModel{
+		items: []string{
+			"Local",
+			"Cloud",
+			"Back",
+		},
+	}
+}
+
+func (m browseTypeModel) Init() tea.Cmd {
+	return nil
+}
+
+func (m browseTypeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c", "q", "esc":
+			m.quitting = true
+			return m, tea.Quit
+
+		case "up", "k":
+			if m.cursor > 0 {
+				m.cursor--
+			}
+
+		case "down", "j":
+			if m.cursor < len(m.items)-1 {
+				m.cursor++
+			}
+
+		case "enter", " ":
+			m.selected = m.items[m.cursor]
 			m.quitting = true
 			return m, tea.Quit
 		}
-
-	case browseModeLocal:
-		if entry.name == ".." {
-			parent := filepath.Dir(m.path)
-
-			if parent != m.path {
-				m.path = parent
-				return m.reloadLocal()
-			}
-
-			return m, nil
-		}
-
-		if entry.isDir {
-			m.path = entry.path
-			return m.reloadLocal()
-		}
-
-	case browseModeCloudAccount:
-		if entry.name == "Back" {
-			return m.goBack()
-		}
-
-		m.remote = entry.name
-		m.remotePath = ""
-
-		return m.reloadCloud()
-
-	case browseModeCloud:
-		if entry.name == ".." {
-			m.remotePath = browse.CloudParent(m.remotePath)
-			return m.reloadCloud()
-		}
-
-		if entry.isDir {
-			m.remotePath = entry.path
-			return m.reloadCloud()
-		}
 	}
 
 	return m, nil
 }
 
-func (m browseModel) openLocal() (tea.Model, tea.Cmd) {
+func (m browseTypeModel) View() string {
+	if m.quitting {
+		return ""
+	}
+
+	var builder strings.Builder
+
+	builder.WriteString("Browse\n\n")
+
+	for i, item := range m.items {
+		cursor := "  "
+		if i == m.cursor {
+			cursor = "> "
+		}
+
+		builder.WriteString(cursor)
+		builder.WriteString(item)
+		builder.WriteString("\n")
+	}
+
+	builder.WriteString("\n↑/↓ navigate, Enter select, Esc cancel\n")
+
+	return builder.String()
+}
+
+func browseLocal() string {
 	preference, err := config.LoadPreference()
 	if err != nil {
-		m.message = fmt.Sprintf("Unable to load preferences: %v", err)
-		return m, nil
+		return err.Error()
 	}
 
-	localPath := preference.StartingLocalDirectory
-
-	if localPath == "" {
-		localPath, err = userHomeDirectory()
-		if err != nil {
-			m.message = err.Error()
-			return m, nil
+	startPath := preference.StartingLocalDirectory
+	if startPath == "" {
+		defaultPreference, defaultErr := config.DefaultPreference()
+		if defaultErr != nil {
+			return defaultErr.Error()
 		}
+
+		startPath = defaultPreference.StartingLocalDirectory
 	}
 
-	m.mode = browseModeLocal
-	m.path = localPath
-	m.cursor = 0
-	m.message = ""
+	model := newBrowseLocalModel(startPath)
 
-	return m.reloadLocal()
-}
-
-func (m browseModel) reloadLocal() (tea.Model, tea.Cmd) {
-	items, err := browse.ListLocal(m.path)
+	result, err := tea.NewProgram(model).Run()
 	if err != nil {
-		m.message = fmt.Sprintf("Unable to browse %q: %v", m.path, err)
-		return m, nil
+		return err.Error()
 	}
 
-	entries := make([]browseEntry, 0, len(items)+1)
-
-	parent := filepath.Dir(m.path)
-
-	if parent != m.path {
-		entries = append(entries, browseEntry{
-			name: "..",
-			path: parent,
-			isDir: true,
-		})
+	finalModel, ok := result.(browseModel)
+	if !ok {
+		return "invalid local browse result"
 	}
 
-	for _, item := range items {
-		entries = append(entries, browseEntry{
-			name:     item.Name,
-			path:     item.Path,
-			isDir:    item.IsDir,
-			size:     item.Size,
-			created:  item.Created,
-			modified: item.Modified,
-		})
+	if finalModel.err != nil {
+		return finalModel.err.Error()
 	}
 
-	m.items = entries
-	m.cursor = 0
-	m.message = ""
-
-	return m, nil
+	return finalModel.selected
 }
 
-func (m browseModel) openCloudAccounts() (tea.Model, tea.Cmd) {
+func browseCloud() string {
 	accounts, err := config.LoadAccounts()
 	if err != nil {
-		m.message = fmt.Sprintf("Unable to load accounts: %v", err)
-		return m, nil
+		return err.Error()
 	}
 
 	if len(accounts) == 0 {
-		m.mode = browseModeCloudAccount
-		m.items = []browseEntry{
-			{name: "Back"},
-		}
-		m.cursor = 0
-		m.message = "No cloud accounts are configured."
-
-		return m, nil
+		return "no cloud accounts configured"
 	}
 
-	entries := make([]browseEntry, 0, len(accounts)+1)
-
+	accountItems := make([]string, 0, len(accounts))
 	for _, account := range accounts {
-		if strings.TrimSpace(account.Label) == "" {
-			continue
+		accountItems = append(accountItems, account.Label)
+	}
+
+	model := newAccountSelectionModel(accountItems)
+
+	result, err := tea.NewProgram(model).Run()
+	if err != nil {
+		return err.Error()
+	}
+
+	finalModel, ok := result.(accountSelectionModel)
+	if !ok || finalModel.selected == "" {
+		return ""
+	}
+
+	var account config.Account
+	for _, candidate := range accounts {
+		if candidate.Label == finalModel.selected {
+			account = candidate
+			break
+		}
+	}
+
+	cloudModel := newBrowseCloudModel(account, "")
+
+	result, err = tea.NewProgram(cloudModel).Run()
+	if err != nil {
+		return err.Error()
+	}
+
+	finalCloudModel, ok := result.(browseModel)
+	if !ok {
+		return "invalid cloud browse result"
+	}
+
+	if finalCloudModel.err != nil {
+		return finalCloudModel.err.Error()
+	}
+
+	return finalCloudModel.selected
+}
+
+type accountSelectionModel struct {
+	items    []string
+	cursor   int
+	selected string
+	quitting bool
+}
+
+func newAccountSelectionModel(items []string) accountSelectionModel {
+	return accountSelectionModel{
+		items: items,
+	}
+}
+
+func (m accountSelectionModel) Init() tea.Cmd {
+	return nil
+}
+
+func (m accountSelectionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c", "q", "esc":
+			m.quitting = true
+			return m, tea.Quit
+
+		case "up", "k":
+			if m.cursor > 0 {
+				m.cursor--
+			}
+
+		case "down", "j":
+			if m.cursor < len(m.items)-1 {
+				m.cursor++
+			}
+
+		case "enter", " ":
+			if len(m.items) == 0 {
+				m.quitting = true
+				return m, tea.Quit
+			}
+
+			m.selected = m.items[m.cursor]
+			m.quitting = true
+			return m, tea.Quit
+		}
+	}
+
+	return m, nil
+}
+
+func (m accountSelectionModel) View() string {
+	if m.quitting {
+		return ""
+	}
+
+	var builder strings.Builder
+
+	builder.WriteString("Select Cloud Account\n\n")
+
+	for i, item := range m.items {
+		cursor := "  "
+		if i == m.cursor {
+			cursor = "> "
 		}
 
-		entries = append(entries, browseEntry{
-			name: account.Label,
-		})
+		builder.WriteString(cursor)
+		builder.WriteString(item)
+		builder.WriteString("\n")
 	}
 
-	entries = append(entries, browseEntry{name: "Back"})
+	builder.WriteString("\n↑/↓ navigate, Enter select, Esc cancel\n")
 
-	m.mode = browseModeCloudAccount
-	m.items = entries
-	m.cursor = 0
-	m.message = ""
-
-	return m, nil
+	return builder.String()
 }
 
-func (m browseModel) reloadCloud() (tea.Model, tea.Cmd) {
-	items, err := browse.ListCloud(m.remote, m.remotePath)
-	if err != nil {
-		m.message = fmt.Sprintf(
-			"Unable to browse %s:%s: %v",
-			m.remote,
-			m.remotePath,
-			err,
-		)
-		return m, nil
+func browseParentPath(current string, isCloud bool) string {
+	if current == "" {
+		return ""
 	}
 
-	entries := make([]browseEntry, 0, len(items)+1)
-
-	if m.remotePath != "" {
-		entries = append(entries, browseEntry{
-			name: "..",
-			path: browse.CloudParent(m.remotePath),
-			isDir: true,
-		})
-	}
-
-	for _, item := range items {
-		entries = append(entries, browseEntry{
-			name:     item.Name,
-			path:     item.Path,
-			isDir:    item.IsDir,
-			size:     item.Size,
-			created:  item.Created,
-			modified: item.Modified,
-		})
-	}
-
-	m.mode = browseModeCloud
-	m.items = entries
-	m.cursor = 0
-	m.message = ""
-
-	return m, nil
-}
-
-func (m browseModel) goBack() (tea.Model, tea.Cmd) {
-	switch m.mode {
-	case browseModeLocation:
-		m.choice = "Back"
-		m.quitting = true
-		return m, tea.Quit
-
-	case browseModeLocal, browseModeCloudAccount:
-		m.mode = browseModeLocation
-		m.items = []browseEntry{
-			{name: "Local"},
-			{name: "Cloud"},
-			{name: "Back"},
+	if isCloud {
+		current = strings.Trim(current, "/")
+		if current == "" {
+			return ""
 		}
-		m.cursor = 0
-		m.message = ""
-		return m, nil
 
-	case browseModeCloud:
-		m.mode = browseModeCloudAccount
-		m.remote = ""
-		m.remotePath = ""
-		m.cursor = 0
-		m.message = ""
+		index := strings.LastIndex(current, "/")
+		if index < 0 {
+			return ""
+		}
 
-		return m.openCloudAccounts()
+		return current[:index]
 	}
 
-	return m, nil
+	parent := filepath.Dir(current)
+	if parent == "." {
+		return ""
+	}
+
+	return parent
 }
 
-func formatEntryMetadata(entry browseEntry) string {
-	var parts []string
-
-	if entry.isDir {
-		parts = append(parts, "dir")
-	} else {
-		parts = append(parts, formatSize(entry.size))
-	}
-
-	if !entry.created.IsZero() {
-		parts = append(parts, "created "+entry.created.Format("2006-01-02 15:04:05"))
-	}
-
-	if !entry.modified.IsZero() {
-		parts = append(parts, "modified "+entry.modified.Format("2006-01-02 15:04:05"))
-	}
-
-	return "  [" + strings.Join(parts, ", ") + "]"
-}
-
-func formatSize(size int64) string {
-	if size < 0 {
-		return "unknown"
-	}
-
-	const (
-		kb = 1024
-		mb = kb * 1024
-		gb = mb * 1024
-	)
-
-	switch {
-	case size >= gb:
-		return fmt.Sprintf("%.2f GB", float64(size)/float64(gb))
-
-	case size >= mb:
-		return fmt.Sprintf("%.2f MB", float64(size)/float64(mb))
-
-	case size >= kb:
-		return fmt.Sprintf("%.2f KB", float64(size)/float64(kb))
-
-	default:
-		return fmt.Sprintf("%d B", size)
-	}
-}
-
-func userHomeDirectory() (string, error) {
-	home, err := config.DefaultPreference()
+func isHomePath(path string) bool {
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("get default local directory: %w", err)
+		return false
 	}
 
-	if home.StartingLocalDirectory == "" {
-		return "", errors.New("starting local directory is not configured")
-	}
-
-	return home.StartingLocalDirectory, nil
+	return filepath.Clean(path) == filepath.Clean(home)
 }
